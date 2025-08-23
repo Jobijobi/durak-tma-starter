@@ -25,3 +25,4 @@ node_modules/
 dist/
 build/
 .DS_Store
+bot/ecosystem.config.cjs
