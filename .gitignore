@@ -26,3 +26,5 @@ dist/
 build/
 .DS_Store
 bot/ecosystem.config.cjs
+bot/.env
+server/.env
