@@ -105,7 +105,8 @@ function sendStateToRoom(room) {
         hand: myHand,
         counts,
         trump: room.game.trump,
-        table: room.game.table || [], // ← НОВОЕ: отправляем «стол»
+        table: room.game.table || [],
+        deckLeft: room.game.deck?.length ?? 0, // ← добавили счётчик колоды
       }),
     );
   }
@@ -141,7 +142,7 @@ wss.on('connection', (ws, req) => {
         ws.user = { id: String(tgUser.id), name: tgUser.first_name || 'Игрок' };
         console.log('[WS] tg auth ->', ws.user.id);
       } else {
-        // ГОСТЕВОЙ доступ (важно: не рвём сокет — иначе будет цикл 1005)
+        // ГОСТЕВОЙ доступ (не рвём сокет — иначе будет цикл 1005)
         const gid = 'guest-' + crypto.randomBytes(3).toString('hex');
         ws.user = { id: gid, name: 'Гость' };
         console.log('[WS] guest auth ->', gid);
@@ -200,13 +201,13 @@ wss.on('connection', (ws, req) => {
       if (room.ownerId !== ws.user.id) { try { ws.send(JSON.stringify({ type: 'error', msg: 'only owner can start' })); } catch {}; return; }
 
       dealSixEach(room);
-      room.game.table = []; // ← НОВОЕ: «стол» для открытых карт
+      room.game.table = []; // «стол» для открытых карт
       console.log('[WS] start_game in', room.id, 'trump', room.game?.trump);
       sendStateToRoom(room);
       return;
     }
 
-    // 4) Игровые демо-команды
+    // 4) Игровые демо-команды (оставляем play_any)
     if (msg.type === 'play_any') {
       const room = rooms.get(ws.roomId);
       if (!room?.game) { try { ws.send(JSON.stringify({ type: 'error', msg: 'no game' })); } catch {}; return; }
@@ -215,6 +216,23 @@ wss.on('connection', (ws, req) => {
       const card = hand.shift();
       room.game.table = room.game.table || [];
       room.game.table.push({ by: ws.user.id, card });
+      sendStateToRoom(room);
+      return;
+    }
+
+    // 4.1) Положить КОНКРЕТНУЮ карту (для клика по карте на фронте)
+    if (msg.type === 'play_card' && typeof msg.card === 'string') {
+      const room = rooms.get(ws.roomId);
+      if (!room?.game) { try { ws.send(JSON.stringify({ type: 'error', msg: 'no game' })); } catch {}; return; }
+
+      const hand = room.game.hands.get(ws.user.id) || [];
+      const idx = hand.indexOf(msg.card);
+      if (idx === -1) { try { ws.send(JSON.stringify({ type: 'error', msg: 'no such card' })); } catch {}; return; }
+
+      const card = hand.splice(idx, 1)[0];
+      room.game.table = room.game.table || [];
+      room.game.table.push({ by: ws.user.id, card });
+
       sendStateToRoom(room);
       return;
     }

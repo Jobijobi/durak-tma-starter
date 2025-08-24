@@ -34,6 +34,7 @@ export default function Lobby() {
   const [counts, setCounts] = useState({});
   const [trump, setTrump] = useState(null);
   const [table, setTable] = useState([]);
+  const [deckLeft, setDeckLeft] = useState(0); // ← добавили размер колоды
 
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
@@ -89,21 +90,21 @@ export default function Lobby() {
         if (msg.type === 'room_created') {
           setMyRoom(msg.room);
           setStatus('Комната создана: ' + msg.room.id);
-          setHand([]); setCounts({}); setTrump(null); setTable([]);
+          setHand([]); setCounts({}); setTrump(null); setTable([]); setDeckLeft(0);
           return;
         }
 
         if (msg.type === 'joined') {
           setMyRoom(msg.room);
           setStatus('Вошёл в комнату: ' + msg.room.id);
-          setHand([]); setCounts({}); setTrump(null); setTable([]);
+          setHand([]); setCounts({}); setTrump(null); setTable([]); setDeckLeft(0);
           return;
         }
 
         if (msg.type === 'left') {
           setMyRoom(null);
           setStatus('Покинул комнату');
-          setHand([]); setCounts({}); setTrump(null); setTable([]);
+          setHand([]); setCounts({}); setTrump(null); setTable([]); setDeckLeft(0);
           return;
         }
 
@@ -122,6 +123,7 @@ export default function Lobby() {
           setCounts(msg.counts || {});
           setTrump(msg.trump || null);
           setTable(msg.table || []);
+          setDeckLeft(msg.deckLeft ?? 0); // ← обновляем размер колоды
           setStatus(`Состояние обновлено`);
           return;
         }
@@ -159,6 +161,9 @@ export default function Lobby() {
   const startGame  = () => send({ type: 'start_game' });
   const playAny    = () => send({ type: 'play_any' });
   const clearTable = () => send({ type: 'clear_table' });
+
+  // новая функция: положить конкретную карту
+  const playCard = (c) => send({ type: 'play_card', card: c });
 
   const isOwner = !!(me && myRoom && myRoom.ownerId === me.id);
 
@@ -230,7 +235,8 @@ export default function Lobby() {
               {(hand?.length || trump || table?.length) && (
                 <div style={{ marginTop: 12 }}>
                   <div style={{ marginBottom: 6 }}>
-                    <b>Козырь:</b> {trump ? prettyCard(trump) : '—'}
+                    <b>Козырь:</b> {trump ? prettyCard(trump) : '—'} &nbsp; • &nbsp;
+                    <b>В колоде:</b> {deckLeft}
                   </div>
 
                   <div style={{ marginBottom: 6 }}>
@@ -249,7 +255,13 @@ export default function Lobby() {
                     <b>Моя рука:</b>
                     <div style={{ marginTop: 6, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                       {hand?.map((c, i) => (
-                        <span key={i} className="pill" style={{ padding: '4px 6px', border: '1px solid #ccc', borderRadius: 6 }}>
+                        <span
+                          key={i}
+                          onClick={() => playCard(c)}
+                          className="pill"
+                          style={{ padding: '4px 6px', border: '1px solid #ccc', borderRadius: 6, cursor: 'pointer' }}
+                          title="Положить карту"
+                        >
                           {prettyCard(c)}
                         </span>
                       ))}
