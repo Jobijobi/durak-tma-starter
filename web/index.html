@@ -1,1 +1,20 @@
-<!doctype html><html><body><div id='root'></div><script type='module' src='/src/main.jsx'></script></body></html>
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Durak TMA</title>
+    <meta name="theme-color" content="#0f1a23" />
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <!-- чтобы не падать, если открылось вне Telegram -->
+    <script>
+      window.Telegram = window.Telegram || { WebApp: { expand(){}, ready(){}, initData: '' } };
+    </script>
+
+    <!-- ВАЖНО: Подключаем только React-приложение -->
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
