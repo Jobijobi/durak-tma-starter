@@ -13,12 +13,25 @@ const BOT_TOKEN = process.env.BOT_TOKEN || ''; // можно пустым — б
 // ─── HTTP (health + CORS) ─────────────────────────────────────────────────────
 const app = express();
 app.use(cors({ origin: FRONT, methods: ['GET', 'POST'], credentials: true }));
+
+// Health для Render по корню и отдельный /health
+app.get('/', (_req, res) => res.status(200).send('OK'));
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 const server = http.createServer(app);
 
 // ─── WS сервер ─────────────────────────────────────────────────────────────────
 const wss = new WebSocketServer({ server, path: '/ws' });
+
+// ─── Глобальные ловушки/логирование ошибок (не даём процессу упасть) ──────────
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err?.stack || err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
+server.on('error', (e) => console.error('[server error]', e));
+wss.on('error', (e) => console.error('[ws error]', e));
 
 // ─── Telegram WebApp подпись (если BOT_TOKEN задан) ───────────────────────────
 function verifyInitData(initData) {
@@ -137,8 +150,7 @@ function drawToSixAfterBout(room, startId, defenderId) {
     pass.add(pid);
     if (pid === defenderId) break;
     pid = nextId(g.order, pid);
-    // защита от зацикливания
-    if (pass.size > g.order.length + 1) break;
+    if (pass.size > g.order.length + 1) break; // защита от зацикливания
   }
 }
 
@@ -333,8 +345,7 @@ wss.on('connection', (ws, req) => {
       // добор до 6: с атакующего, защитник — последний
       drawToSixAfterBout(room, g.attackerId, g.defenderId);
 
-      // роли сдвигаются: следующий после атакующего становится атакующим,
-      // а следующий за ним — защитником
+      // роли сдвигаются
       g.attackerId = nextId(g.order, g.attackerId);
       g.defenderId = nextId(g.order, g.attackerId);
 
@@ -359,7 +370,7 @@ wss.on('connection', (ws, req) => {
       // добор до 6: с атакующего, защитник — последним
       drawToSixAfterBout(room, g.attackerId, g.defenderId);
 
-      // атакующий остаётся тем же; новый защитник — следующий после текущего защитника
+      // атакующий остаётся тем же; новый защитник — следующий
       g.defenderId = nextId(g.order, g.defenderId);
 
       sendStateToRoom(room);
