@@ -6,43 +6,28 @@ import http from 'http';
 import { WebSocketServer } from 'ws';
 import crypto from 'crypto';
 
-// ───────────────────────────────────────────────────────────────────────────────
-// ENV
-// FRONT — домен фронта (открывается через кнопку в боте)
+// ── ENV ────────────────────────────────────────────────────────────────────────
 const FRONT = process.env.FRONT_ORIGIN ?? 'https://durak-tma-starter-1.onrender.com';
-// BOT_TOKEN — токен твоего телеграм-бота (для проверки initData)
 const BOT_TOKEN = process.env.BOT_TOKEN || '';
-// ALLOW_DEV=1 — временно разрешает логин «без Telegram», чтобы тестировать лобби
-const ALLOW_DEV = process.env.ALLOW_DEV === '1';
 
-// ───────────────────────────────────────────────────────────────────────────────
-// HTTP (health + CORS)
+// ── HTTP + CORS ────────────────────────────────────────────────────────────────
 const app = express();
-app.use(
-  cors({
-    origin: FRONT,
-    methods: ['GET', 'POST'],
-    credentials: true,
-  }),
-);
+app.use(cors({ origin: FRONT, methods: ['GET', 'POST'], credentials: true }));
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 const server = http.createServer(app);
 
-// ───────────────────────────────────────────────────────────────────────────────
-// WS сервер
+// ── WS ─────────────────────────────────────────────────────────────────────────
 const wss = new WebSocketServer({ server, path: '/ws' });
 
 // Проверка подписи Telegram WebApp initData
 function verifyInitData(initData) {
   if (!initData || !BOT_TOKEN) return null;
-
   const params = new URLSearchParams(initData);
 
-  // собираем словарь без hash
-  const map = {};
-  for (const [k, v] of params.entries()) map[k] = v;
-
+  const entries = [];
+  for (const [k, v] of params.entries()) entries.push([k, v]);
+  const map = Object.fromEntries(entries);
   const hash = map.hash;
   delete map.hash;
 
@@ -56,14 +41,9 @@ function verifyInitData(initData) {
 
   if (hmac !== hash) return null;
 
-  try {
-    return JSON.parse(map.user); // { id, first_name, ... }
-  } catch {
-    return null;
-  }
+  try { return JSON.parse(map.user); } catch { return null; }
 }
 
-// ───────────────────────────────────────────────────────────────────────────────
 // Простые комнаты (in-memory)
 const rooms = new Map(); // roomId -> { id, ownerId, players:Set<number>, createdAt, game? }
 const roomSnapshot = (r) => ({
@@ -82,13 +62,12 @@ function broadcastToRoom(roomId, payload) {
   }
 }
 
-// ───────────────────────────────────────────────────────────────────────────────
-// Карточная «логика» (минимум для демо)
+// Мини-«игра»: колода, раздача
 function newDeck() {
-  const suits = ['C', 'D', 'H', 'S']; // трефы, бубны, червы, пики
-  const ranks = ['6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
+  const suits = ['C', 'D', 'H', 'S'];
+  const ranks = ['6','7','8','9','10','J','Q','K','A'];
   const deck = [];
-  for (const s of suits) for (const r of ranks) deck.push(r + s); // "6C", "10H"…
+  for (const s of suits) for (const r of ranks) deck.push(r + s);
   return deck;
 }
 function shuffle(a) {
@@ -117,83 +96,75 @@ function sendStateToRoom(room) {
     if (client.readyState !== 1 || client.roomId !== room.id) continue;
     const uid = client.user.id;
     const myHand = room.game.hands.get(uid) ?? [];
-    client.send(
-      JSON.stringify({
-        type: 'state',
-        roomId: room.id,
-        hand: myHand, // только свои карты
-        counts, // сколько карт у всех
-        trump: room.game.trump,
-      }),
-    );
+    client.send(JSON.stringify({
+      type: 'state',
+      roomId: room.id,
+      hand: myHand,
+      counts,
+      trump: room.game.trump,
+    }));
   }
 }
 
-// ───────────────────────────────────────────────────────────────────────────────
-// Логика WS
-wss.on('connection', (ws) => {
+// ── Основная WS-логика ────────────────────────────────────────────────────────
+wss.on('connection', (ws, req) => {
+  // узнаём, гость ли это
+  const url = new URL(req.url, 'http://x');
+  const allowGuest = url.searchParams.get('guest') === '1';
+
   // heartbeat
   ws.isAlive = true;
-  ws.on('pong', () => {
-    ws.isAlive = true;
-  });
+  ws.on('pong', () => { ws.isAlive = true; });
 
-  // базовое приветствие (не даёт прав)
+  // привет
   ws.send(JSON.stringify({ type: 'hello', msg: 'connected' }));
 
   let authed = false;
 
   ws.on('message', (raw) => {
     let msg;
-    try {
-      msg = JSON.parse(raw.toString());
-    } catch {
+    try { msg = JSON.parse(raw.toString()); } catch {
       ws.send(JSON.stringify({ type: 'error', msg: 'bad json' }));
       return;
     }
 
-    // разрешаем ping до auth
+    // До авторизации позволяем только ping
     if (msg.type === 'ping') {
       ws.send(JSON.stringify({ type: 'pong', t: Date.now() }));
       return;
     }
 
-    // 1) Авторизация первым сообщением
+    // Авторизация первым сообщением
     if (!authed) {
       if (msg.type !== 'auth') {
-        console.log('[WS] got non-auth first message → reject');
         ws.send(JSON.stringify({ type: 'error', msg: 'auth required' }));
         return;
       }
 
-      const user = verifyInitData(msg.initData);
-      console.log('[WS] auth:', {
-        initDataPresent: Boolean(msg.initData && String(msg.initData).length > 0),
-        userId: user?.id ?? null,
-        allowDev: ALLOW_DEV,
-      });
-
-      if (!user?.id) {
-        if (ALLOW_DEV) {
-          // DEV-режим: пускаем фейкового пользователя
-          ws.user = { id: Date.now(), name: 'Dev' };
-          authed = true;
-          ws.send(JSON.stringify({ type: 'auth_ok', user: ws.user }));
-          return;
-        }
-        ws.send(JSON.stringify({ type: 'error', msg: 'bad initData' }));
-        console.log('[WS] close 4001 (bad auth)');
-        ws.close(4001, 'bad auth');
+      // 1) Пытаемся проверить Telegram initData
+      const userFromTg = verifyInitData(msg.initData);
+      if (userFromTg?.id) {
+        ws.user = { id: userFromTg.id, name: userFromTg.first_name || 'Игрок' };
+        authed = true;
+        ws.send(JSON.stringify({ type: 'auth_ok', user: ws.user }));
         return;
       }
 
-      ws.user = { id: user.id, name: user.first_name || 'Игрок' };
-      authed = true;
-      ws.send(JSON.stringify({ type: 'auth_ok', user: ws.user }));
+      // 2) Иначе, если разрешён гость — пускаем как «guest-*»
+      if (allowGuest) {
+        ws.user = { id: `guest-${crypto.randomUUID().slice(0,6)}`, name: 'Гость' };
+        authed = true;
+        ws.send(JSON.stringify({ type: 'auth_ok', user: ws.user }));
+        return;
+      }
+
+      // 3) Иначе — доступ запрещён
+      ws.send(JSON.stringify({ type: 'error', msg: 'bad initData' }));
+      ws.close(4001, 'bad auth');
       return;
     }
 
-    // 2) Сообщения ЛОББИ (для авторизованных)
+    // Лобби:
     if (msg.type === 'list_rooms') {
       const list = Array.from(rooms.values()).map(roomSnapshot);
       ws.send(JSON.stringify({ type: 'rooms', list }));
@@ -212,23 +183,17 @@ wss.on('connection', (ws) => {
 
     if (msg.type === 'join_room' && typeof msg.roomId === 'string') {
       const room = rooms.get(msg.roomId);
-      if (!room) {
-        ws.send(JSON.stringify({ type: 'error', msg: 'room not found' }));
-        return;
-      }
+      if (!room) { ws.send(JSON.stringify({ type: 'error', msg: 'room not found' })); return; }
       room.players.add(ws.user.id);
       ws.roomId = room.id;
       ws.send(JSON.stringify({ type: 'joined', room: roomSnapshot(room) }));
       broadcastToRoom(room.id, { type: 'room_update', room: roomSnapshot(room) });
-      if (room.game) sendStateToRoom(room); // если игра уже шла — пришлём состояние
+      if (room.game) sendStateToRoom(room);
       return;
     }
 
     if (msg.type === 'leave_room') {
-      if (!ws.roomId) {
-        ws.send(JSON.stringify({ type: 'left' }));
-        return;
-      }
+      if (!ws.roomId) { ws.send(JSON.stringify({ type: 'left' })); return; }
       const room = rooms.get(ws.roomId);
       if (room) {
         room.players.delete(ws.user.id);
@@ -240,13 +205,9 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // ── старт игры ─────────────────────────────────────────────────────────────
     if (msg.type === 'start_game') {
       const room = rooms.get(ws.roomId);
-      if (!room) {
-        ws.send(JSON.stringify({ type: 'error', msg: 'no room' }));
-        return;
-      }
+      if (!room) { ws.send(JSON.stringify({ type: 'error', msg: 'no room' })); return; }
       if (room.ownerId !== ws.user.id) {
         ws.send(JSON.stringify({ type: 'error', msg: 'only owner can start' }));
         return;
@@ -257,8 +218,7 @@ wss.on('connection', (ws) => {
     }
   });
 
-  ws.on('close', (code, reason) => {
-    console.log('[WS] closed', code, reason?.toString() || '');
+  ws.on('close', () => {
     if (ws.roomId) {
       const room = rooms.get(ws.roomId);
       if (room) {
@@ -275,19 +235,15 @@ const HEARTBEAT = setInterval(() => {
   wss.clients.forEach((ws) => {
     if (!ws.isAlive) return ws.terminate();
     ws.isAlive = false;
-    try {
-      ws.ping();
-    } catch {}
+    try { ws.ping(); } catch {}
   });
 }, 30_000);
 wss.on('close', () => clearInterval(HEARTBEAT));
 
-// ───────────────────────────────────────────────────────────────────────────────
 // START
 const PORT = Number(process.env.PORT || 8787);
 server.listen(PORT, () => {
   console.log('Server running on', PORT);
   console.log('Allowed origin:', FRONT);
   console.log('Has BOT_TOKEN for auth:', !!BOT_TOKEN);
-  console.log('ALLOW_DEV:', ALLOW_DEV);
 });
