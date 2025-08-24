@@ -2,11 +2,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 
 /**
- * Откуда брать адрес бэкенда:
- *   1) web/.env → VITE_SERVER_ORIGIN=https://durak-tma-starter.onrender.com
- *   2) (опционально) в index.html можно задать:
- *        <script>window.__SERVER_ORIGIN='https://...';</script>
- *   3) иначе берём window.location.origin (для локалки)
+ * Источник адреса бэкенда:
+ *  window.__SERVER_ORIGIN  ||  import.meta.env.VITE_SERVER_ORIGIN  ||  window.location.origin
  */
 const SERVER_ORIGIN =
   (typeof window !== 'undefined' && window.__SERVER_ORIGIN) ||
@@ -17,7 +14,6 @@ const serverURL = new URL(SERVER_ORIGIN);
 const wsScheme = serverURL.protocol === 'https:' ? 'wss' : 'ws';
 const WS_URL = `${wsScheme}://${serverURL.host}/ws`;
 
-// Красивый вывод карт
 const suitEmoji = (s) => ({ C: '♣️', D: '♦️', H: '♥️', S: '♠️' }[s] || s);
 const prettyCard = (c) => {
   const m = String(c).match(/^(\d+|[JQKA])([CDHS])$/);
@@ -26,23 +22,24 @@ const prettyCard = (c) => {
 };
 
 export default function Lobby() {
-  const [status, setStatus]   = useState('Подключение…');
-  const [ready, setReady]     = useState(false);
-  const [rooms, setRooms]     = useState([]);
-  const [me, setMe]           = useState(null);
-  const [myRoom, setMyRoom]   = useState(null);
+  const [status, setStatus] = useState('Подключение…');
+  const [ready, setReady] = useState(false);
+  const [rooms, setRooms] = useState([]);
+  const [me, setMe] = useState(null);
+  const [myRoom, setMyRoom] = useState(null);
   const [roomCode, setRoomCode] = useState('');
 
-  // состояние игры
-  const [hand, setHand]       = useState([]);
-  const [counts, setCounts]   = useState({});
-  const [trump, setTrump]     = useState(null);
+  // игра
+  const [hand, setHand] = useState([]);
+  const [counts, setCounts] = useState({});
+  const [trump, setTrump] = useState(null);
+  const [table, setTable] = useState([]);
 
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
+  const pingTimer = useRef(null);
 
   useEffect(() => {
-    // Telegram WebApp API (вне Telegram будет заглушка из index.html)
     const tg = window?.Telegram?.WebApp ?? { initData: '' };
     try { tg.expand?.(); tg.ready?.(); } catch {}
 
@@ -58,6 +55,12 @@ export default function Lobby() {
         setReady(true);
         setStatus('WS открыт, авторизация…');
         ws.send(JSON.stringify({ type: 'auth', initData: tg.initData || '' }));
+
+        // keep-alive ping
+        clearInterval(pingTimer.current);
+        pingTimer.current = setInterval(() => {
+          if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'ping' }));
+        }, 20000);
       };
 
       ws.onmessage = (ev) => {
@@ -86,21 +89,21 @@ export default function Lobby() {
         if (msg.type === 'room_created') {
           setMyRoom(msg.room);
           setStatus('Комната создана: ' + msg.room.id);
-          setHand([]); setCounts({}); setTrump(null);
+          setHand([]); setCounts({}); setTrump(null); setTable([]);
           return;
         }
 
         if (msg.type === 'joined') {
           setMyRoom(msg.room);
           setStatus('Вошёл в комнату: ' + msg.room.id);
-          setHand([]); setCounts({}); setTrump(null);
+          setHand([]); setCounts({}); setTrump(null); setTable([]);
           return;
         }
 
         if (msg.type === 'left') {
           setMyRoom(null);
           setStatus('Покинул комнату');
-          setHand([]); setCounts({}); setTrump(null);
+          setHand([]); setCounts({}); setTrump(null); setTable([]);
           return;
         }
 
@@ -114,44 +117,38 @@ export default function Lobby() {
           return;
         }
 
-        // Состояние игры (раздача и т.п.)
         if (msg.type === 'state') {
           setHand(msg.hand || []);
           setCounts(msg.counts || {});
           setTrump(msg.trump || null);
-          setStatus(`Получено состояние (козырь: ${prettyCard(msg.trump)})`);
+          setTable(msg.table || []);
+          setStatus(`Состояние обновлено`);
           return;
         }
       };
 
-      ws.onerror = () => {
-        // причину покажет onclose
-        console.debug('[WS] error');
-      };
+      ws.onerror = () => console.debug('[WS] error');
 
       ws.onclose = (e) => {
         setReady(false);
         setStatus(`WS закрыт (code=${e.code}, reason=${e.reason || '-'})`);
-        // автоподключение через 2 сек
+        clearInterval(pingTimer.current);
         reconnectTimer.current = setTimeout(connect, 2000);
       };
     };
 
     connect();
-
     return () => {
       clearTimeout(reconnectTimer.current);
+      clearInterval(pingTimer.current);
       try { wsRef.current?.close(); } catch {}
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ——— helpers ———
   const send = (obj) => {
     const ws = wsRef.current;
-    if (!ws || ws.readyState !== 1) {
-      setStatus('WS не готов');
-      return;
-    }
+    if (!ws || ws.readyState !== 1) { setStatus('WS не готов'); return; }
     ws.send(JSON.stringify(obj));
   };
 
@@ -160,10 +157,11 @@ export default function Lobby() {
   const joinRoom   = () => roomCode && send({ type: 'join_room', roomId: roomCode.trim() });
   const leaveRoom  = () => send({ type: 'leave_room' });
   const startGame  = () => send({ type: 'start_game' });
+  const playAny    = () => send({ type: 'play_any' });
+  const clearTable = () => send({ type: 'clear_table' });
 
   const isOwner = !!(me && myRoom && myRoom.ownerId === me.id);
 
-  // ——— UI ———
   return (
     <div className="container" style={{ maxWidth: 820, margin: '24px auto', padding: '0 16px' }}>
       <section className="card" style={{ border: '1px solid #ddd', borderRadius: 12, padding: 16 }}>
@@ -189,7 +187,16 @@ export default function Lobby() {
           />
           <button className="btn" onClick={joinRoom}  disabled={!ready}>Войти</button>
           <button className="btn" onClick={leaveRoom} disabled={!ready}>Выйти</button>
-          <button className="btn" onClick={startGame} disabled={!ready || !isOwner || !myRoom}>Начать игру</button>
+
+          <button className="btn" onClick={startGame} disabled={!ready || !isOwner || !myRoom}>
+            Начать игру
+          </button>
+          <button className="btn" onClick={playAny} disabled={!ready || !myRoom}>
+            Положить карту (демо)
+          </button>
+          <button className="btn" onClick={clearTable} disabled={!ready || !isOwner || !myRoom}>
+            Очистить стол
+          </button>
         </div>
 
         {me && (
@@ -220,11 +227,24 @@ export default function Lobby() {
                 участники: {myRoom.players?.join(', ') || '—'}
               </div>
 
-              {(hand?.length || trump) && (
+              {(hand?.length || trump || table?.length) && (
                 <div style={{ marginTop: 12 }}>
                   <div style={{ marginBottom: 6 }}>
                     <b>Козырь:</b> {trump ? prettyCard(trump) : '—'}
                   </div>
+
+                  <div style={{ marginBottom: 6 }}>
+                    <b>Стол:</b>
+                    <div style={{ marginTop: 6, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                      {(table || []).map((t, i) => (
+                        <span key={i} className="pill" style={{ padding: '4px 6px', border: '1px solid #ccc', borderRadius: 6 }}>
+                          {prettyCard(t.card)} <span style={{color:'#888'}}>({t.by})</span>
+                        </span>
+                      ))}
+                      {(!table || table.length === 0) && <span style={{color:'#666'}}>—</span>}
+                    </div>
+                  </div>
+
                   <div>
                     <b>Моя рука:</b>
                     <div style={{ marginTop: 6, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -233,8 +253,10 @@ export default function Lobby() {
                           {prettyCard(c)}
                         </span>
                       ))}
+                      {(!hand || hand.length === 0) && <span style={{color:'#666'}}>—</span>}
                     </div>
                   </div>
+
                   <div style={{ marginTop: 8, fontSize: 13, color: '#555' }}>
                     <b>Карты у игроков:</b>{' '}
                     {Object.keys(counts).length

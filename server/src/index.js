@@ -90,6 +90,7 @@ function dealSixEach(room) {
 }
 function sendStateToRoom(room) {
   if (!room.game) return;
+
   const counts = {};
   for (const uid of room.players) counts[uid] = room.game.hands.get(uid)?.length ?? 0;
 
@@ -104,6 +105,7 @@ function sendStateToRoom(room) {
         hand: myHand,
         counts,
         trump: room.game.trump,
+        table: room.game.table || [], // ← НОВОЕ: отправляем «стол»
       }),
     );
   }
@@ -114,72 +116,44 @@ wss.on('connection', (ws, req) => {
   console.log('[WS] +connection from', req?.headers?.['x-forwarded-for'] || req?.socket?.remoteAddress);
 
   ws.isAlive = true;
-  ws.on('pong', () => {
-    ws.isAlive = true;
-  });
+  ws.on('pong', () => (ws.isAlive = true));
   ws.on('error', (e) => console.error('[WS] socket error:', e?.message || e));
 
-  try {
-    ws.send(JSON.stringify({ type: 'hello', msg: 'connected' }));
-  } catch (e) {
-    console.error('[WS] send hello error:', e);
-  }
+  try { ws.send(JSON.stringify({ type: 'hello', msg: 'connected' })); } catch {}
 
   let authed = false;
 
   ws.on('message', (raw) => {
     let msg;
-    try {
-      msg = JSON.parse(raw.toString());
-    } catch {
-      try {
-        ws.send(JSON.stringify({ type: 'error', msg: 'bad json' }));
-      } catch {}
-      return;
-    }
+    try { msg = JSON.parse(raw.toString()); }
+    catch { try { ws.send(JSON.stringify({ type: 'error', msg: 'bad json' })); } catch {}; return; }
 
     // пинг до авторизации разрешён
-    if (msg.type === 'ping') {
-      try {
-        ws.send(JSON.stringify({ type: 'pong', t: Date.now() }));
-      } catch {}
-      return;
-    }
+    if (msg.type === 'ping') { try { ws.send(JSON.stringify({ type: 'pong', t: Date.now() })); } catch {}; return; }
 
     // 1) Авторизация
     if (!authed) {
-      if (msg.type !== 'auth') {
-        try {
-          ws.send(JSON.stringify({ type: 'error', msg: 'auth required' }));
-        } catch {}
-        return;
-      }
+      if (msg.type !== 'auth') { try { ws.send(JSON.stringify({ type: 'error', msg: 'auth required' })); } catch {}; return; }
 
       let tgUser = null;
-      try {
-        tgUser = verifyInitData(msg.initData);
-      } catch {}
+      try { tgUser = verifyInitData(msg.initData); } catch {}
       if (tgUser?.id) {
         ws.user = { id: String(tgUser.id), name: tgUser.first_name || 'Игрок' };
         console.log('[WS] tg auth ->', ws.user.id);
       } else {
-        // ГОСТЕВОЙ доступ, чтобы не было обрыва соединения
+        // ГОСТЕВОЙ доступ (важно: не рвём сокет — иначе будет цикл 1005)
         const gid = 'guest-' + crypto.randomBytes(3).toString('hex');
         ws.user = { id: gid, name: 'Гость' };
         console.log('[WS] guest auth ->', gid);
       }
       authed = true;
-      try {
-        ws.send(JSON.stringify({ type: 'auth_ok', user: ws.user }));
-      } catch {}
+      try { ws.send(JSON.stringify({ type: 'auth_ok', user: ws.user })); } catch {}
       return;
     }
 
     // 2) Лобби
     if (msg.type === 'list_rooms') {
-      try {
-        ws.send(JSON.stringify({ type: 'rooms', list: Array.from(rooms.values()).map(roomSnapshot) }));
-      } catch {}
+      try { ws.send(JSON.stringify({ type: 'rooms', list: Array.from(rooms.values()).map(roomSnapshot) })); } catch {}
       return;
     }
 
@@ -189,39 +163,25 @@ wss.on('connection', (ws, req) => {
       rooms.set(id, room);
       ws.roomId = id;
       console.log('[WS] room created', id, 'owner', ws.user.id);
-      try {
-        ws.send(JSON.stringify({ type: 'room_created', room: roomSnapshot(room) }));
-      } catch {}
+      try { ws.send(JSON.stringify({ type: 'room_created', room: roomSnapshot(room) })); } catch {}
       broadcastToRoom(id, { type: 'room_update', room: roomSnapshot(room) });
       return;
     }
 
     if (msg.type === 'join_room' && typeof msg.roomId === 'string') {
       const room = rooms.get(msg.roomId);
-      if (!room) {
-        try {
-          ws.send(JSON.stringify({ type: 'error', msg: 'room not found' }));
-        } catch {}
-        return;
-      }
+      if (!room) { try { ws.send(JSON.stringify({ type: 'error', msg: 'room not found' })); } catch {}; return; }
       room.players.add(ws.user.id);
       ws.roomId = room.id;
       console.log('[WS] joined', room.id, 'user', ws.user.id);
-      try {
-        ws.send(JSON.stringify({ type: 'joined', room: roomSnapshot(room) }));
-      } catch {}
+      try { ws.send(JSON.stringify({ type: 'joined', room: roomSnapshot(room) })); } catch {}
       broadcastToRoom(room.id, { type: 'room_update', room: roomSnapshot(room) });
       if (room.game) sendStateToRoom(room);
       return;
     }
 
     if (msg.type === 'leave_room') {
-      if (!ws.roomId) {
-        try {
-          ws.send(JSON.stringify({ type: 'left' }));
-        } catch {}
-        return;
-      }
+      if (!ws.roomId) { try { ws.send(JSON.stringify({ type: 'left' })); } catch {}; return; }
       const room = rooms.get(ws.roomId);
       if (room) {
         room.players.delete(ws.user.id);
@@ -229,29 +189,41 @@ wss.on('connection', (ws, req) => {
         if (room.players.size === 0) rooms.delete(room.id);
       }
       ws.roomId = null;
-      try {
-        ws.send(JSON.stringify({ type: 'left' }));
-      } catch {}
+      try { ws.send(JSON.stringify({ type: 'left' })); } catch {}
       return;
     }
 
     // 3) Старт игры
     if (msg.type === 'start_game') {
       const room = rooms.get(ws.roomId);
-      if (!room) {
-        try {
-          ws.send(JSON.stringify({ type: 'error', msg: 'no room' }));
-        } catch {}
-        return;
-      }
-      if (room.ownerId !== ws.user.id) {
-        try {
-          ws.send(JSON.stringify({ type: 'error', msg: 'only owner can start' }));
-        } catch {}
-        return;
-      }
+      if (!room) { try { ws.send(JSON.stringify({ type: 'error', msg: 'no room' })); } catch {}; return; }
+      if (room.ownerId !== ws.user.id) { try { ws.send(JSON.stringify({ type: 'error', msg: 'only owner can start' })); } catch {}; return; }
+
       dealSixEach(room);
+      room.game.table = []; // ← НОВОЕ: «стол» для открытых карт
       console.log('[WS] start_game in', room.id, 'trump', room.game?.trump);
+      sendStateToRoom(room);
+      return;
+    }
+
+    // 4) Игровые демо-команды
+    if (msg.type === 'play_any') {
+      const room = rooms.get(ws.roomId);
+      if (!room?.game) { try { ws.send(JSON.stringify({ type: 'error', msg: 'no game' })); } catch {}; return; }
+      const hand = room.game.hands.get(ws.user.id) || [];
+      if (hand.length === 0) { try { ws.send(JSON.stringify({ type: 'error', msg: 'empty hand' })); } catch {}; return; }
+      const card = hand.shift();
+      room.game.table = room.game.table || [];
+      room.game.table.push({ by: ws.user.id, card });
+      sendStateToRoom(room);
+      return;
+    }
+
+    if (msg.type === 'clear_table') {
+      const room = rooms.get(ws.roomId);
+      if (!room?.game) { try { ws.send(JSON.stringify({ type: 'error', msg: 'no game' })); } catch {}; return; }
+      if (room.ownerId !== ws.user.id) { try { ws.send(JSON.stringify({ type: 'error', msg: 'owner only' })); } catch {}; return; }
+      room.game.table = [];
       sendStateToRoom(room);
       return;
     }
@@ -275,9 +247,7 @@ const HEARTBEAT = setInterval(() => {
   wss.clients.forEach((ws) => {
     if (!ws.isAlive) return ws.terminate();
     ws.isAlive = false;
-    try {
-      ws.ping();
-    } catch {}
+    try { ws.ping(); } catch {}
   });
 }, 30_000);
 wss.on('close', () => clearInterval(HEARTBEAT));
