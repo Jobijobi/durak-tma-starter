@@ -5,27 +5,33 @@ import React, { useEffect, useRef, useState } from 'react';
  * Адрес бэкенда берём из web/.env:
  *   VITE_SERVER_ORIGIN=https://durak-tma-starter.onrender.com
  * Если переменной нет, используем текущий origin (на случай локалки).
+ * Для отладки можно переопределить глобально:
+ *   window.__SERVER_ORIGIN = 'https://....onrender.com'
  */
 const SERVER_ORIGIN =
-  import.meta.env.VITE_SERVER_ORIGIN ?? window.location.origin;
+  (typeof window !== 'undefined' && window.__SERVER_ORIGIN) ||
+  import.meta.env.VITE_SERVER_ORIGIN ||
+  window.location.origin;
 
 const serverURL = new URL(SERVER_ORIGIN);
 const wsScheme = serverURL.protocol === 'https:' ? 'wss' : 'ws';
 const WS_URL = `${wsScheme}://${serverURL.host}/ws`;
 
+console.log('[WS] SERVER_ORIGIN =', SERVER_ORIGIN);
+console.log('[WS] WS_URL        =', WS_URL);
+
 export default function Lobby() {
-  const [status, setStatus]   = useState('Подключение…');
-  const [ready, setReady]     = useState(false);
-  const [rooms, setRooms]     = useState([]);
-  const [me, setMe]           = useState(null);
-  const [myRoom, setMyRoom]   = useState(null);
+  const [status, setStatus] = useState('Подключение…');
+  const [ready, setReady]   = useState(false);
+  const [rooms, setRooms]   = useState([]);
+  const [me, setMe]         = useState(null);
+  const [myRoom, setMyRoom] = useState(null);
   const [roomCode, setRoomCode] = useState('');
 
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
 
   useEffect(() => {
-    // Telegram WebApp API (вне Telegram будет заглушка из index.html)
     const tg = window?.Telegram?.WebApp ?? { initData: '' };
     try { tg.expand?.(); tg.ready?.(); } catch {}
 
@@ -34,13 +40,17 @@ export default function Lobby() {
       setStatus('Подключение…');
       setReady(false);
 
-      const ws = new WebSocket(WS_URL);
+      // ⬇️ если не из Telegram (initData пустой) — добавляем guest=1
+      const url = new URL(WS_URL);
+      if (!tg.initData) url.searchParams.set('guest', '1');
+      console.log('[WS] opening', url.toString());
+
+      const ws = new WebSocket(url);
       wsRef.current = ws;
 
       ws.onopen = () => {
         setReady(true);
         setStatus('WS открыт, авторизация…');
-        // важный шаг: шлём initData для авторизации на сервере
         ws.send(JSON.stringify({ type: 'auth', initData: tg.initData || '' }));
       };
 
@@ -86,31 +96,25 @@ export default function Lobby() {
         }
 
         if (msg.type === 'room_update') {
-          setRooms((prev) => {
-            const map = new Map(prev.map((r) => [r.id, r]));
+          setRooms(prev => {
+            const map = new Map(prev.map(r => [r.id, r]));
             map.set(msg.room.id, msg.room);
             return Array.from(map.values());
           });
           if (myRoom?.id === msg.room.id) setMyRoom(msg.room);
-          return;
         }
       };
 
-      ws.onerror = () => {
-        // onclose покажет причину/код
-        console.debug('WS error');
-      };
+      ws.onerror = () => console.debug('[WS] error');
 
       ws.onclose = (e) => {
         setReady(false);
         setStatus(`WS закрыт (code=${e.code}, reason=${e.reason || '-'})`);
-        // авто-переподключение
         reconnectTimer.current = setTimeout(connect, 2000);
       };
     };
 
     connect();
-
     return () => {
       clearTimeout(reconnectTimer.current);
       try { wsRef.current?.close(); } catch {}
@@ -120,10 +124,7 @@ export default function Lobby() {
 
   const send = (obj) => {
     const ws = wsRef.current;
-    if (!ws || ws.readyState !== 1) {
-      setStatus('WS не готов');
-      return;
-    }
+    if (!ws || ws.readyState !== 1) { setStatus('WS не готов'); return; }
     ws.send(JSON.stringify(obj));
   };
 
@@ -137,8 +138,11 @@ export default function Lobby() {
       <section className="card" style={{ border: '1px solid #ddd', borderRadius: 12, padding: 16 }}>
         <h1 style={{ marginTop: 0 }}>Лобби</h1>
 
-        <div style={{ color: '#444', marginBottom: 12 }}>
+        <div style={{ color: '#444', marginBottom: 6 }}>
           <b>Статус:</b> {status} {ready ? '✅' : '⏳'}
+        </div>
+        <div style={{ fontSize: 12, color: '#888', marginBottom: 12 }}>
+          server: <code>{WS_URL}</code>
         </div>
 
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '12px 0' }}>
