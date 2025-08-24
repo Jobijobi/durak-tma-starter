@@ -1,9 +1,6 @@
+// web/src/main.jsx
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import Lobby from './lobby.js';
+import Lobby from './lobby.jsx'; // <-- ВАЖНО: нижний регистр и .jsx
 
-function App() {
-  return <Lobby />;
-}
-
-createRoot(document.getElementById('root')).render(<App />);
+createRoot(document.getElementById('root')).render(<Lobby />);
