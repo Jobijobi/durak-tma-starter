@@ -2,10 +2,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 
 /**
- * Адрес бэкенда берём из web/.env:
- *   VITE_SERVER_ORIGIN=https://durak-tma-starter.onrender.com
- * Можно переопределить в index.html так:
- *   <script>window.__SERVER_ORIGIN='https://...';</script>
+ * Откуда брать адрес бэкенда:
+ *   1) web/.env → VITE_SERVER_ORIGIN=https://durak-tma-starter.onrender.com
+ *   2) (опционально) в index.html можно задать:
+ *        <script>window.__SERVER_ORIGIN='https://...';</script>
+ *   3) иначе берём window.location.origin (для локалки)
  */
 const SERVER_ORIGIN =
   (typeof window !== 'undefined' && window.__SERVER_ORIGIN) ||
@@ -16,9 +17,9 @@ const serverURL = new URL(SERVER_ORIGIN);
 const wsScheme = serverURL.protocol === 'https:' ? 'wss' : 'ws';
 const WS_URL = `${wsScheme}://${serverURL.host}/ws`;
 
+// Красивый вывод карт
 const suitEmoji = (s) => ({ C: '♣️', D: '♦️', H: '♥️', S: '♠️' }[s] || s);
 const prettyCard = (c) => {
-  // "10H" / "QS" / "6C" ...
   const m = String(c).match(/^(\d+|[JQKA])([CDHS])$/);
   if (!m) return String(c);
   return `${m[1]}${suitEmoji(m[2])}`;
@@ -32,15 +33,16 @@ export default function Lobby() {
   const [myRoom, setMyRoom]   = useState(null);
   const [roomCode, setRoomCode] = useState('');
 
-  // Новое: состояние игры
-  const [hand, setHand]       = useState([]);       // твои карты
-  const [counts, setCounts]   = useState({});       // сколько карт у всех
-  const [trump, setTrump]     = useState(null);     // козырь
+  // состояние игры
+  const [hand, setHand]       = useState([]);
+  const [counts, setCounts]   = useState({});
+  const [trump, setTrump]     = useState(null);
 
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
 
   useEffect(() => {
+    // Telegram WebApp API (вне Telegram будет заглушка из index.html)
     const tg = window?.Telegram?.WebApp ?? { initData: '' };
     try { tg.expand?.(); tg.ready?.(); } catch {}
 
@@ -84,7 +86,6 @@ export default function Lobby() {
         if (msg.type === 'room_created') {
           setMyRoom(msg.room);
           setStatus('Комната создана: ' + msg.room.id);
-          // сбросим прошлое состояние игры
           setHand([]); setCounts({}); setTrump(null);
           return;
         }
@@ -92,7 +93,6 @@ export default function Lobby() {
         if (msg.type === 'joined') {
           setMyRoom(msg.room);
           setStatus('Вошёл в комнату: ' + msg.room.id);
-          // сброс возможного старого состояния
           setHand([]); setCounts({}); setTrump(null);
           return;
         }
@@ -105,8 +105,8 @@ export default function Lobby() {
         }
 
         if (msg.type === 'room_update') {
-          setRooms(prev => {
-            const map = new Map(prev.map(r => [r.id, r]));
+          setRooms((prev) => {
+            const map = new Map(prev.map((r) => [r.id, r]));
             map.set(msg.room.id, msg.room);
             return Array.from(map.values());
           });
@@ -114,7 +114,7 @@ export default function Lobby() {
           return;
         }
 
-        // Новое: пришло состояние игры после раздачи
+        // Состояние игры (раздача и т.п.)
         if (msg.type === 'state') {
           setHand(msg.hand || []);
           setCounts(msg.counts || {});
@@ -125,12 +125,14 @@ export default function Lobby() {
       };
 
       ws.onerror = () => {
+        // причину покажет onclose
         console.debug('[WS] error');
       };
 
       ws.onclose = (e) => {
         setReady(false);
         setStatus(`WS закрыт (code=${e.code}, reason=${e.reason || '-'})`);
+        // автоподключение через 2 сек
         reconnectTimer.current = setTimeout(connect, 2000);
       };
     };
@@ -141,9 +143,9 @@ export default function Lobby() {
       clearTimeout(reconnectTimer.current);
       try { wsRef.current?.close(); } catch {}
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ——— helpers ———
   const send = (obj) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== 1) {
@@ -153,15 +155,15 @@ export default function Lobby() {
     ws.send(JSON.stringify(obj));
   };
 
-  const listRooms   = () => send({ type: 'list_rooms' });
-  const createRoom  = () => send({ type: 'create_room' });
-  const joinRoom    = () => roomCode && send({ type: 'join_room', roomId: roomCode.trim() });
-  const leaveRoom   = () => send({ type: 'leave_room' });
+  const listRooms  = () => send({ type: 'list_rooms' });
+  const createRoom = () => send({ type: 'create_room' });
+  const joinRoom   = () => roomCode && send({ type: 'join_room', roomId: roomCode.trim() });
+  const leaveRoom  = () => send({ type: 'leave_room' });
+  const startGame  = () => send({ type: 'start_game' });
 
-  // Новое: старт раздачи (только владелец)
-  const startGame   = () => send({ type: 'start_game' });
-  const isOwner     = !!(me && myRoom && myRoom.ownerId === me.id);
+  const isOwner = !!(me && myRoom && myRoom.ownerId === me.id);
 
+  // ——— UI ———
   return (
     <div className="container" style={{ maxWidth: 820, margin: '24px auto', padding: '0 16px' }}>
       <section className="card" style={{ border: '1px solid #ddd', borderRadius: 12, padding: 16 }}>
@@ -187,16 +189,7 @@ export default function Lobby() {
           />
           <button className="btn" onClick={joinRoom}  disabled={!ready}>Войти</button>
           <button className="btn" onClick={leaveRoom} disabled={!ready}>Выйти</button>
-
-          {/* Новое: кнопка старта — только для владельца */}
-          <button
-            className="btn"
-            onClick={startGame}
-            disabled={!ready || !isOwner || !myRoom}
-            title={!isOwner ? 'Только владелец может начать' : 'Начать раздачу'}
-          >
-            Начать игру
-          </button>
+          <button className="btn" onClick={startGame} disabled={!ready || !isOwner || !myRoom}>Начать игру</button>
         </div>
 
         {me && (
@@ -216,7 +209,6 @@ export default function Lobby() {
           ))}
         </ul>
 
-        {/* Блок состояния игры */}
         <div className="card" style={{ border: '1px dashed #ccc', borderRadius: 12, padding: 12, marginTop: 16 }}>
           <b>Моя комната:</b>
           {!myRoom && <div style={{ marginTop: 6, color: '#666' }}>ещё не в комнате</div>}
@@ -228,7 +220,6 @@ export default function Lobby() {
                 участники: {myRoom.players?.join(', ') || '—'}
               </div>
 
-              {/* Показ руки и козыря */}
               {(hand?.length || trump) && (
                 <div style={{ marginTop: 12 }}>
                   <div style={{ marginBottom: 6 }}>
