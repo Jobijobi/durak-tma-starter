@@ -8,13 +8,23 @@ import crypto from 'crypto';
 
 // ───────────────────────────────────────────────────────────────────────────────
 // ENV
+// FRONT — домен фронта (открывается через кнопку в боте)
 const FRONT = process.env.FRONT_ORIGIN ?? 'https://durak-tma-starter-1.onrender.com';
-const BOT_TOKEN = process.env.BOT_TOKEN || ''; // для проверки initData из Telegram
+// BOT_TOKEN — токен твоего телеграм-бота (для проверки initData)
+const BOT_TOKEN = process.env.BOT_TOKEN || '';
+// ALLOW_DEV=1 — временно разрешает логин «без Telegram», чтобы тестировать лобби
+const ALLOW_DEV = process.env.ALLOW_DEV === '1';
 
 // ───────────────────────────────────────────────────────────────────────────────
 // HTTP (health + CORS)
 const app = express();
-app.use(cors({ origin: FRONT, methods: ['GET', 'POST'], credentials: true }));
+app.use(
+  cors({
+    origin: FRONT,
+    methods: ['GET', 'POST'],
+    credentials: true,
+  }),
+);
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 const server = http.createServer(app);
@@ -26,12 +36,13 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 // Проверка подписи Telegram WebApp initData
 function verifyInitData(initData) {
   if (!initData || !BOT_TOKEN) return null;
+
   const params = new URLSearchParams(initData);
 
   // собираем словарь без hash
-  const entries = [];
-  for (const [k, v] of params.entries()) entries.push([k, v]);
-  const map = Object.fromEntries(entries);
+  const map = {};
+  for (const [k, v] of params.entries()) map[k] = v;
+
   const hash = map.hash;
   delete map.hash;
 
@@ -46,7 +57,7 @@ function verifyInitData(initData) {
   if (hmac !== hash) return null;
 
   try {
-    return JSON.parse(map.user); // {id, first_name, ...}
+    return JSON.parse(map.user); // { id, first_name, ... }
   } catch {
     return null;
   }
@@ -74,14 +85,17 @@ function broadcastToRoom(roomId, payload) {
 // ───────────────────────────────────────────────────────────────────────────────
 // Карточная «логика» (минимум для демо)
 function newDeck() {
-  const suits = ['C', 'D', 'H', 'S'];              // трефы, бубны, червы, пики
-  const ranks = ['6','7','8','9','10','J','Q','K','A'];
+  const suits = ['C', 'D', 'H', 'S']; // трефы, бубны, червы, пики
+  const ranks = ['6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
   const deck = [];
   for (const s of suits) for (const r of ranks) deck.push(r + s); // "6C", "10H"…
   return deck;
 }
 function shuffle(a) {
-  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
   return a;
 }
 function dealSixEach(room) {
@@ -103,13 +117,15 @@ function sendStateToRoom(room) {
     if (client.readyState !== 1 || client.roomId !== room.id) continue;
     const uid = client.user.id;
     const myHand = room.game.hands.get(uid) ?? [];
-    client.send(JSON.stringify({
-      type: 'state',
-      roomId: room.id,
-      hand: myHand,       // только свои карты
-      counts,             // сколько карт у всех
-      trump: room.game.trump,
-    }));
+    client.send(
+      JSON.stringify({
+        type: 'state',
+        roomId: room.id,
+        hand: myHand, // только свои карты
+        counts, // сколько карт у всех
+        trump: room.game.trump,
+      }),
+    );
   }
 }
 
@@ -118,7 +134,9 @@ function sendStateToRoom(room) {
 wss.on('connection', (ws) => {
   // heartbeat
   ws.isAlive = true;
-  ws.on('pong', () => { ws.isAlive = true; });
+  ws.on('pong', () => {
+    ws.isAlive = true;
+  });
 
   // базовое приветствие (не даёт прав)
   ws.send(JSON.stringify({ type: 'hello', msg: 'connected' }));
@@ -134,7 +152,7 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // разрешаем ping до auth, чтобы было удобно проверять соединение
+    // разрешаем ping до auth
     if (msg.type === 'ping') {
       ws.send(JSON.stringify({ type: 'pong', t: Date.now() }));
       return;
@@ -143,15 +161,32 @@ wss.on('connection', (ws) => {
     // 1) Авторизация первым сообщением
     if (!authed) {
       if (msg.type !== 'auth') {
+        console.log('[WS] got non-auth first message → reject');
         ws.send(JSON.stringify({ type: 'error', msg: 'auth required' }));
         return;
       }
+
       const user = verifyInitData(msg.initData);
+      console.log('[WS] auth:', {
+        initDataPresent: Boolean(msg.initData && String(msg.initData).length > 0),
+        userId: user?.id ?? null,
+        allowDev: ALLOW_DEV,
+      });
+
       if (!user?.id) {
+        if (ALLOW_DEV) {
+          // DEV-режим: пускаем фейкового пользователя
+          ws.user = { id: Date.now(), name: 'Dev' };
+          authed = true;
+          ws.send(JSON.stringify({ type: 'auth_ok', user: ws.user }));
+          return;
+        }
         ws.send(JSON.stringify({ type: 'error', msg: 'bad initData' }));
+        console.log('[WS] close 4001 (bad auth)');
         ws.close(4001, 'bad auth');
         return;
       }
+
       ws.user = { id: user.id, name: user.first_name || 'Игрок' };
       authed = true;
       ws.send(JSON.stringify({ type: 'auth_ok', user: ws.user }));
@@ -177,18 +212,23 @@ wss.on('connection', (ws) => {
 
     if (msg.type === 'join_room' && typeof msg.roomId === 'string') {
       const room = rooms.get(msg.roomId);
-      if (!room) { ws.send(JSON.stringify({ type: 'error', msg: 'room not found' })); return; }
+      if (!room) {
+        ws.send(JSON.stringify({ type: 'error', msg: 'room not found' }));
+        return;
+      }
       room.players.add(ws.user.id);
       ws.roomId = room.id;
       ws.send(JSON.stringify({ type: 'joined', room: roomSnapshot(room) }));
       broadcastToRoom(room.id, { type: 'room_update', room: roomSnapshot(room) });
-      // если игра уже шла — сразу пришлём состояние
-      if (room.game) sendStateToRoom(room);
+      if (room.game) sendStateToRoom(room); // если игра уже шла — пришлём состояние
       return;
     }
 
     if (msg.type === 'leave_room') {
-      if (!ws.roomId) { ws.send(JSON.stringify({ type: 'left' })); return; }
+      if (!ws.roomId) {
+        ws.send(JSON.stringify({ type: 'left' }));
+        return;
+      }
       const room = rooms.get(ws.roomId);
       if (room) {
         room.players.delete(ws.user.id);
@@ -200,10 +240,13 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // ── НОВОЕ: старт игры ──────────────────────────────────────────────────────
+    // ── старт игры ─────────────────────────────────────────────────────────────
     if (msg.type === 'start_game') {
       const room = rooms.get(ws.roomId);
-      if (!room) { ws.send(JSON.stringify({ type: 'error', msg: 'no room' })); return; }
+      if (!room) {
+        ws.send(JSON.stringify({ type: 'error', msg: 'no room' }));
+        return;
+      }
       if (room.ownerId !== ws.user.id) {
         ws.send(JSON.stringify({ type: 'error', msg: 'only owner can start' }));
         return;
@@ -214,7 +257,8 @@ wss.on('connection', (ws) => {
     }
   });
 
-  ws.on('close', () => {
+  ws.on('close', (code, reason) => {
+    console.log('[WS] closed', code, reason?.toString() || '');
     if (ws.roomId) {
       const room = rooms.get(ws.roomId);
       if (room) {
@@ -231,7 +275,9 @@ const HEARTBEAT = setInterval(() => {
   wss.clients.forEach((ws) => {
     if (!ws.isAlive) return ws.terminate();
     ws.isAlive = false;
-    try { ws.ping(); } catch {}
+    try {
+      ws.ping();
+    } catch {}
   });
 }, 30_000);
 wss.on('close', () => clearInterval(HEARTBEAT));
@@ -243,4 +289,5 @@ server.listen(PORT, () => {
   console.log('Server running on', PORT);
   console.log('Allowed origin:', FRONT);
   console.log('Has BOT_TOKEN for auth:', !!BOT_TOKEN);
+  console.log('ALLOW_DEV:', ALLOW_DEV);
 });
